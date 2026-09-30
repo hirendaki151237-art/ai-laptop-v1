@@ -151,6 +151,11 @@ async function extractFlipkartListing(url: string): Promise<ExtractedListingData
     error: null,
   };
 
+  // Flipkart scraping disabled in AI Studio (Playwright not supported)
+  result.error = 'Flipkart scraping unavailable in this environment.';
+  return result;
+
+  /* 
   let playwrightModule: typeof import('playwright');
   try {
     playwrightModule = await import('playwright');
@@ -159,7 +164,9 @@ async function extractFlipkartListing(url: string): Promise<ExtractedListingData
     result.error = 'Flipkart scraping unavailable in this environment (Playwright not available)';
     return result;
   }
+  */
 
+  /*
   let browser: import('playwright').Browser | null = null;
 
   try {
@@ -270,6 +277,7 @@ async function extractFlipkartListing(url: string): Promise<ExtractedListingData
       }
     }
   }
+  */
 }
 
 /**

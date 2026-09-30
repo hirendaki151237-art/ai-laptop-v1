@@ -1,18 +1,24 @@
 import express from 'express';
 import path from 'path';
-import dotenv from 'dotenv';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import apiRoutes from './src/server/routes/index.ts';
 import { requestIdMiddleware, apiErrorHandler } from './src/server/middleware/observability.ts';
 import { recoverStaleJobs } from './src/server/repositories/jobsRepository.ts';
 import { isSupabaseConfigured } from './src/server/external/supabase.ts';
+import { config, validateConfig } from './src/server/config.ts';
 
-dotenv.config();
+// Validate configuration at startup
+try {
+  validateConfig();
+} catch (err: any) {
+  console.error('[Config] Startup Error:', err.message);
+  process.exit(1);
+}
 
 async function startServer() {
   const app = express();
-  const PORT = parseInt(process.env.PORT || '3000', 10);
+  const PORT = config.port;
 
   // Trust reverse proxy (Cloud Run / Nginx) for accurate client IP resolution
   app.set('trust proxy', 1);

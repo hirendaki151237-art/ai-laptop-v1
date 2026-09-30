@@ -1,5 +1,6 @@
 import { getGeminiClient, isGeminiConfigured } from '../external/gemini.ts';
 import { APP_CONFIG } from '../../shared/constants/index.ts';
+import { config } from '../config.ts';
 
 export type ModelHealthStatus =
   | 'available'
@@ -27,8 +28,11 @@ export interface GeminiModelInfo {
 }
 
 // Current runtime active model (server-level configuration)
-let activeModelId: string =
-  process.env.GEMINI_MODEL?.trim() || APP_CONFIG.defaultGeminiModel || 'gemini-3.8-flash';
+const rawModel = config.geminiModel?.trim();
+const initialModel = (rawModel && !rawModel.startsWith('AIza') && !rawModel.startsWith('AQ.') && !rawModel.includes('"') && !rawModel.includes("'"))
+  ? rawModel
+  : (APP_CONFIG.defaultGeminiModel || 'gemini-3.8-flash');
+let activeModelId: string = initialModel;
 
 // Cache for recent health check results per model ID to avoid duplicate rate-limit pressure
 const modelHealthCache = new Map<
@@ -47,8 +51,8 @@ export function getActiveGeminiModel(): string {
 
 export function setActiveGeminiModel(modelId: string): string {
   const cleanId = modelId.replace(/^models\//, '').trim();
-  if (!cleanId) {
-    throw new Error('Invalid model ID provided.');
+  if (!cleanId || cleanId.startsWith('AIza') || cleanId.startsWith('AQ.') || cleanId.includes('"') || cleanId.includes("'")) {
+    throw new Error('Invalid model ID provided. API keys cannot be set as model IDs.');
   }
   activeModelId = cleanId;
   return activeModelId;
@@ -61,11 +65,13 @@ export function setActiveGeminiModel(modelId: string): string {
 export async function listExtractionModels(): Promise<{
   models: GeminiModelInfo[];
   currentModel: string;
+  activeModel: string;
 }> {
   if (!isGeminiConfigured()) {
     return {
       models: [],
       currentModel: activeModelId,
+      activeModel: activeModelId,
     };
   }
 
@@ -158,6 +164,7 @@ export async function listExtractionModels(): Promise<{
     return {
       models,
       currentModel: activeModelId,
+      activeModel: activeModelId,
     };
   } catch (err: any) {
     console.error('Failed to list Gemini models from API:', err);
@@ -169,6 +176,7 @@ export async function listExtractionModels(): Promise<{
  * Real Model Health Test:
  * Performs a minimal test generation request ("Reply with exactly OK.")
  * Distinguishes AVAILABLE, QUOTA_LIMITED, AUTH_ERROR, and UNAVAILABLE.
+ * Handles 503 high-demand spike with bounded retry.
  * Never exposes API credentials.
  */
 export async function testModelHealth(modelId: string): Promise<{
@@ -189,103 +197,133 @@ export async function testModelHealth(modelId: string): Promise<{
     };
   }
 
-  const start = Date.now();
-  try {
-    const ai = getGeminiClient();
-    const response = await ai.models.generateContent({
-      model: cleanId,
-      contents: 'Reply with exactly OK.',
-    });
+  const maxAttempts = 2;
+  let lastError: any = null;
 
-    const latencyMs = Date.now() - start;
-    const text = response.text?.trim() || '';
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const start = Date.now();
+    try {
+      const ai = getGeminiClient();
+      const response = await ai.models.generateContent({
+        model: cleanId,
+        contents: 'Reply with exactly OK.',
+      });
 
-    if (text.toUpperCase().includes('OK')) {
+      const latencyMs = Date.now() - start;
+      const text = response.text?.trim() || '';
+
+      if (text.toUpperCase().includes('OK')) {
+        const result = {
+          model: cleanId,
+          status: 'available' as const,
+          latencyMs,
+        };
+        modelHealthCache.set(cleanId, {
+          status: 'available',
+          latencyMs,
+          testedAt: Date.now(),
+        });
+        return result;
+      }
+
       const result = {
         model: cleanId,
-        status: 'available' as const,
+        status: 'unavailable' as const,
         latencyMs,
+        code: 200,
+        error: `Unexpected test response: ${text.slice(0, 60)}`,
       };
       modelHealthCache.set(cleanId, {
-        status: 'available',
+        status: 'unavailable',
         latencyMs,
+        error: result.error,
         testedAt: Date.now(),
       });
       return result;
+    } catch (err: any) {
+      lastError = err;
+      const statusCode = err?.status || err?.code;
+      // 503: High demand spike. Perform 1 bounded retry
+      if (statusCode === 503 && attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 600));
+        continue;
+      }
+      break;
     }
-
-    const result = {
-      model: cleanId,
-      status: 'unavailable' as const,
-      latencyMs,
-      code: 200,
-      error: `Unexpected test response: ${text.slice(0, 60)}`,
-    };
-    modelHealthCache.set(cleanId, {
-      status: 'unavailable',
-      latencyMs,
-      error: result.error,
-      testedAt: Date.now(),
-    });
-    return result;
-  } catch (err: any) {
-    const latencyMs = Date.now() - start;
-    const rawError = err?.message || String(err);
-    const sanitizedError = rawError
-      .replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED_KEY]')
-      .replace(/https:\/\/[^@\s]+@/g, 'https://[REDACTED]@');
-
-    let status: ModelHealthStatus = 'unavailable';
-    let code = err?.status || err?.code || 500;
-    let userError = sanitizedError;
-
-    // Classify 429 / Quota
-    if (
-      err?.status === 429 ||
-      sanitizedError.includes('429') ||
-      sanitizedError.includes('RESOURCE_EXHAUSTED') ||
-      sanitizedError.toLowerCase().includes('quota') ||
-      sanitizedError.toLowerCase().includes('rate limit')
-    ) {
-      status = 'quota_limited';
-      code = 429;
-      userError = 'Quota limit reached for this model. Try another model or wait for quota reset.';
-    } else if (
-      err?.status === 401 ||
-      err?.status === 403 ||
-      sanitizedError.includes('API_KEY_INVALID') ||
-      sanitizedError.includes('401') ||
-      sanitizedError.includes('403')
-    ) {
-      status = 'auth_error';
-      code = 401;
-      userError = 'Authentication failed: Invalid or unauthorized Gemini API key.';
-    } else if (
-      err?.status === 404 ||
-      sanitizedError.includes('404') ||
-      sanitizedError.toLowerCase().includes('not found') ||
-      sanitizedError.toLowerCase().includes('no longer available')
-    ) {
-      status = 'unavailable';
-      code = 404;
-      userError = 'Model is deprecated or unavailable to this project.';
-    }
-
-    const result = {
-      model: cleanId,
-      status,
-      code,
-      latencyMs,
-      error: userError,
-    };
-
-    modelHealthCache.set(cleanId, {
-      status,
-      latencyMs,
-      error: userError,
-      testedAt: Date.now(),
-    });
-
-    return result;
   }
+
+  const rawError = lastError?.message || String(lastError);
+  const sanitizedError = rawError
+    .replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED_KEY]')
+    .replace(/AQ\.[A-Za-z0-9_-]+/g, '[REDACTED_KEY]')
+    .replace(/https:\/\/[^@\s]+@/g, 'https://[REDACTED]@');
+
+  let status: ModelHealthStatus = 'unavailable';
+  let code = lastError?.status || lastError?.code || 500;
+  let userError = sanitizedError;
+
+  // Classify 429 / Quota
+  if (
+    code === 429 ||
+    sanitizedError.includes('429') ||
+    sanitizedError.includes('RESOURCE_EXHAUSTED') ||
+    sanitizedError.toLowerCase().includes('quota') ||
+    sanitizedError.toLowerCase().includes('rate limit')
+  ) {
+    status = 'quota_limited';
+    code = 429;
+    userError = 'Quota limit reached for this model. Try another model or wait for quota reset.';
+  } else if (
+    code === 401 ||
+    sanitizedError.includes('API_KEY_INVALID') ||
+    sanitizedError.includes('401')
+  ) {
+    status = 'auth_error';
+    code = 401;
+    userError = 'Authentication failed (401): Invalid or unauthorized Gemini API key.';
+  } else if (
+    code === 403 ||
+    sanitizedError.includes('403') ||
+    sanitizedError.toLowerCase().includes('permission denied')
+  ) {
+    status = 'auth_error';
+    code = 403;
+    userError = 'Permission denied (403): Gemini access restricted or unauthorized.';
+  } else if (
+    code === 503 ||
+    sanitizedError.includes('503') ||
+    sanitizedError.toLowerCase().includes('high demand')
+  ) {
+    status = 'unavailable';
+    code = 503;
+    userError = 'Model is currently experiencing high demand (503). Spikes in demand are usually temporary.';
+  } else if (
+    code === 404 ||
+    sanitizedError.includes('404') ||
+    sanitizedError.toLowerCase().includes('not found') ||
+    sanitizedError.toLowerCase().includes('no longer available')
+  ) {
+    status = 'unavailable';
+    code = 404;
+    userError = 'Model is deprecated or unavailable to this project.';
+  } else if (code === 400 || sanitizedError.includes('400')) {
+    status = 'unavailable';
+    code = 400;
+    userError = 'Request error (400): Bad request or model configuration error.';
+  }
+
+  const result = {
+    model: cleanId,
+    status,
+    code,
+    error: userError,
+  };
+
+  modelHealthCache.set(cleanId, {
+    status,
+    error: userError,
+    testedAt: Date.now(),
+  });
+
+  return result;
 }

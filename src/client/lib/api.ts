@@ -6,22 +6,6 @@ import type {
   GeminiModelInfo,
 } from '../../shared/types/index.ts';
 
-const ADMIN_KEY_STORAGE = 'ai_laptop_review_admin_key';
-
-export function getStoredAdminKey(): string {
-  if (typeof window === 'undefined') return '';
-  return localStorage.getItem(ADMIN_KEY_STORAGE) || sessionStorage.getItem(ADMIN_KEY_STORAGE) || 'v2-dev-admin-key';
-}
-
-export function setStoredAdminKey(key: string, persist: boolean = true): void {
-  if (typeof window === 'undefined') return;
-  if (persist) {
-    localStorage.setItem(ADMIN_KEY_STORAGE, key.trim());
-  } else {
-    sessionStorage.setItem(ADMIN_KEY_STORAGE, key.trim());
-  }
-}
-
 export async function fetchApi<T = any>(
   endpoint: string,
   options: RequestInit = {}
@@ -29,11 +13,6 @@ export async function fetchApi<T = any>(
   const headers = new Headers(options.headers || {});
   if (!headers.has('Content-Type') && options.body && typeof options.body === 'string') {
     headers.set('Content-Type', 'application/json');
-  }
-
-  const adminKey = getStoredAdminKey();
-  if (adminKey && !headers.has('x-admin-key')) {
-    headers.set('x-admin-key', adminKey);
   }
 
   const response = await fetch(endpoint, {

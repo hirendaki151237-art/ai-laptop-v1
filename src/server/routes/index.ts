@@ -102,7 +102,11 @@ router.get('/status', async (req: Request, res: Response, next: NextFunction) =>
 router.get('/gemini/models', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const data = await listExtractionModels();
-    res.json(data);
+    res.json({
+      activeModel: data.currentModel,
+      currentModel: data.currentModel,
+      models: data.models,
+    });
   } catch (err: any) {
     res.status(500).json({
       error: {
@@ -139,11 +143,24 @@ router.post('/gemini/model', (req: Request, res: Response) => {
     });
     return;
   }
+
+  const cleanModel = model.replace(/^models\//, '').trim();
+  if (cleanModel.startsWith('AIza') || cleanModel.startsWith('AQ.') || cleanModel.length > 50 || cleanModel.includes('"') || cleanModel.includes("'")) {
+    res.status(400).json({
+      error: {
+        code: ERROR_CODES.INVALID_INPUT,
+        message: 'Invalid model ID provided. API keys cannot be set as model identifiers.',
+      },
+    });
+    return;
+  }
+
   try {
-    const active = setActiveGeminiModel(model);
+    const active = setActiveGeminiModel(cleanModel);
     res.json({
       success: true,
       currentModel: active,
+      activeModel: active,
       message: `Active extraction model set to ${active}`,
     });
   } catch (err: any) {

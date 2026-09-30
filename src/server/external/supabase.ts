@@ -1,4 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { config } from '../config.ts';
 
 let supabaseClientInstance: SupabaseClient | null = null;
 
@@ -7,9 +8,8 @@ export function getSupabaseClient(): SupabaseClient {
     return supabaseClientInstance;
   }
 
-  const supabaseUrl = process.env.SUPABASE_URL?.trim();
-  // V2 rule: accept SUPABASE_SECRET_KEY, with backward compatibility for SUPABASE_SERVICE_ROLE_KEY
-  const supabaseKey = (process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY)?.trim();
+  const supabaseUrl = config.supabaseUrl;
+  const supabaseKey = config.supabaseSecretKey;
 
   if (!supabaseUrl || !supabaseKey) {
     throw new Error('DATABASE_NOT_CONFIGURED: SUPABASE_URL and SUPABASE_SECRET_KEY must be set.');
@@ -31,9 +31,7 @@ export function getSupabaseClient(): SupabaseClient {
 }
 
 export function isSupabaseConfigured(): boolean {
-  const url = process.env.SUPABASE_URL?.trim();
-  const key = (process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY)?.trim();
-  return Boolean(url && key);
+  return Boolean(config.supabaseUrl && config.supabaseSecretKey);
 }
 
 export type SupabaseStatusState =

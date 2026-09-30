@@ -2,11 +2,17 @@ import { GoogleGenAI, Type } from '@google/genai';
 import type { ExtractedDataPayload, ServiceState } from '../../shared/types/index.ts';
 import { ExtractedDataPayloadSchema, normalizeExtractionInput } from '../../shared/schemas/extraction.ts';
 import { APP_CONFIG, PRIORITY_GAMES, TARGET_BENCHMARK_FAMILIES } from '../../shared/constants/index.ts';
+import { config } from '../config.ts';
 
 let geminiClientInstance: GoogleGenAI | null = null;
 
 export function getGeminiModelName(): string {
-  return process.env.GEMINI_MODEL?.trim() || APP_CONFIG.defaultGeminiModel;
+  const model = config.geminiModel?.trim();
+  // Ensure the model ID is a valid identifier and never an API key
+  if (model && !model.startsWith('AIza') && !model.startsWith('AQ.') && !model.includes('"') && !model.includes("'")) {
+    return model;
+  }
+  return APP_CONFIG.defaultGeminiModel || 'gemini-3.8-flash';
 }
 
 export function getGeminiClient(): GoogleGenAI {
@@ -14,7 +20,7 @@ export function getGeminiClient(): GoogleGenAI {
     return geminiClientInstance;
   }
 
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  const apiKey = config.geminiApiKey?.trim();
   if (!apiKey) {
     throw new Error('GEMINI_NOT_CONFIGURED: GEMINI_API_KEY environment variable is not set.');
   }
@@ -32,7 +38,7 @@ export function getGeminiClient(): GoogleGenAI {
 }
 
 export function isGeminiConfigured(): boolean {
-  return Boolean(process.env.GEMINI_API_KEY?.trim());
+  return Boolean(config.geminiApiKey?.trim());
 }
 
 export interface GeminiHealthResult {
@@ -53,67 +59,106 @@ export async function testGeminiConnection(): Promise<GeminiHealthResult> {
     };
   }
 
-  const start = Date.now();
-  try {
-    const ai = getGeminiClient();
-    const response = await ai.models.generateContent({
-      model: modelName,
-      contents: 'Reply with exactly OK.',
-    });
+  const maxAttempts = 2;
+  let lastError: any = null;
 
-    const latencyMs = Date.now() - start;
-    const text = response.text?.trim();
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const start = Date.now();
+    try {
+      const ai = getGeminiClient();
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: 'Reply with exactly OK.',
+      });
 
-    if (text && text.toUpperCase().includes('OK')) {
+      const latencyMs = Date.now() - start;
+      const text = response.text?.trim() || '';
+
+      if (text.toUpperCase().includes('OK')) {
+        return {
+          status: 'LIVE',
+          model: modelName,
+          latencyMs,
+        };
+      }
+
       return {
-        status: 'LIVE',
+        status: 'WARNING',
         model: modelName,
         latencyMs,
+        error: `Unexpected test response: ${text.slice(0, 50)}`,
       };
+    } catch (err: any) {
+      lastError = err;
+      const statusCode = err?.status || err?.code;
+      // 503: High demand spike. Perform 1 bounded retry
+      if (statusCode === 503 && attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 600));
+        continue;
+      }
+      break;
     }
+  }
 
+  const rawMsg = lastError?.message || String(lastError);
+  const sanitizedMsg = rawMsg
+    .replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED_KEY]')
+    .replace(/AQ\.[A-Za-z0-9_-]+/g, '[REDACTED_KEY]')
+    .replace(/https:\/\/[^@\s]+@/g, 'https://[REDACTED]@');
+
+  const statusCode = lastError?.status || lastError?.code;
+
+  if (statusCode === 401 || sanitizedMsg.includes('API_KEY_INVALID') || sanitizedMsg.includes('401')) {
+    return {
+      status: 'AUTH_ERROR',
+      model: modelName,
+      error: `GEMINI_AUTH_FAILED: Authentication failed (401). Invalid API key.`,
+    };
+  }
+
+  if (statusCode === 403 || sanitizedMsg.includes('403')) {
+    return {
+      status: 'AUTH_ERROR',
+      model: modelName,
+      error: `GEMINI_PERMISSION_DENIED: Access restricted or permission denied (403).`,
+    };
+  }
+
+  if (
+    statusCode === 429 ||
+    sanitizedMsg.includes('429') ||
+    sanitizedMsg.includes('RESOURCE_EXHAUSTED') ||
+    sanitizedMsg.toLowerCase().includes('quota') ||
+    sanitizedMsg.toLowerCase().includes('rate limit')
+  ) {
+    return {
+      status: 'QUOTA_LIMITED',
+      model: modelName,
+      error: 'GEMINI_QUOTA_EXCEEDED: Model rate limit or quota exceeded (429).',
+    };
+  }
+
+  if (statusCode === 503 || sanitizedMsg.includes('503') || sanitizedMsg.toLowerCase().includes('high demand')) {
     return {
       status: 'WARNING',
       model: modelName,
-      latencyMs,
-      error: `Unexpected test response: ${text?.slice(0, 50)}`,
+      error: 'GEMINI_HIGH_DEMAND: Model is currently experiencing high demand (503). Spikes are temporary.',
     };
-  } catch (err: any) {
-    const latencyMs = Date.now() - start;
-    const rawMsg = err?.message || String(err);
-    const sanitizedMsg = rawMsg.replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED_KEY]');
+  }
 
-    if (sanitizedMsg.includes('API_KEY_INVALID') || sanitizedMsg.includes('401') || sanitizedMsg.includes('403')) {
-      return {
-        status: 'AUTH_ERROR',
-        model: modelName,
-        latencyMs,
-        error: `GEMINI_AUTH_FAILED: Invalid API key (${sanitizedMsg.slice(0, 100)})`,
-      };
-    }
-
-    if (
-      err?.status === 429 ||
-      sanitizedMsg.includes('429') ||
-      sanitizedMsg.includes('RESOURCE_EXHAUSTED') ||
-      sanitizedMsg.toLowerCase().includes('quota') ||
-      sanitizedMsg.toLowerCase().includes('rate limit')
-    ) {
-      return {
-        status: 'QUOTA_LIMITED',
-        model: modelName,
-        latencyMs,
-        error: 'GEMINI_QUOTA_EXCEEDED: Model rate limit or quota exceeded.',
-      };
-    }
-
+  if (statusCode === 400 || sanitizedMsg.includes('400')) {
     return {
       status: 'ERROR',
       model: modelName,
-      latencyMs,
-      error: sanitizedMsg.slice(0, 200),
+      error: `GEMINI_REQUEST_ERROR: Bad request or unsupported configuration (400).`,
     };
   }
+
+  return {
+    status: 'ERROR',
+    model: modelName,
+    error: sanitizedMsg.slice(0, 200),
+  };
 }
 
 /**
@@ -382,7 +427,7 @@ Extract only verified measurements and facts present in this video.`;
       ) {
         throw new Error('RATE LIMITED: Gemini model quota exceeded. Please retry shortly.');
       }
-      const cleanError = fallbackMsg.replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED_KEY]');
+      const cleanError = fallbackMsg.replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED_KEY]').replace(/AQ\.[A-Za-z0-9_-]+/g, '[REDACTED_KEY]');
       throw new Error(`GEMINI_EXTRACTION_FAILED: ${cleanError}`);
     }
   }

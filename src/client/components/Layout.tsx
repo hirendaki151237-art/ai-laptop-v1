@@ -5,18 +5,13 @@ import {
   Sparkles,
   ListTodo,
   Activity,
-  Key,
   CheckCircle2,
   AlertTriangle,
   XCircle,
   HelpCircle,
   RefreshCw,
-  User,
-  Shield,
-  Sliders,
-  Users,
 } from 'lucide-react';
-import { api, getStoredAdminKey, setStoredAdminKey } from '../lib/api.ts';
+import { api } from '../lib/api.ts';
 import { SystemStatusResponse } from '../../shared/types/index.ts';
 import { Modal } from './ui/Modal.tsx';
 import { StatusBadge } from './ui/StatusBadge.tsx';
@@ -38,9 +33,6 @@ export const Layout: React.FC<LayoutProps> = ({
   const [status, setStatus] = useState<SystemStatusResponse | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusModalOpen, setStatusModalOpen] = useState(false);
-  const [adminModalOpen, setAdminModalOpen] = useState(false);
-  const [adminKeyInput, setAdminKeyInput] = useState('');
-  const [adminSaved, setAdminSaved] = useState(false);
 
   const fetchStatus = async () => {
     setStatusLoading(true);
@@ -59,19 +51,6 @@ export const Layout: React.FC<LayoutProps> = ({
     const interval = setInterval(fetchStatus, 30000);
     return () => clearInterval(interval);
   }, []);
-
-  useEffect(() => {
-    setAdminKeyInput(getStoredAdminKey());
-  }, [adminModalOpen]);
-
-  const handleSaveAdminKey = () => {
-    setStoredAdminKey(adminKeyInput);
-    setAdminSaved(true);
-    setTimeout(() => {
-      setAdminSaved(false);
-      setAdminModalOpen(false);
-    }, 800);
-  };
 
   const getStatusIcon = (st?: string) => {
     if (st === 'LIVE') return <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />;
@@ -202,14 +181,6 @@ export const Layout: React.FC<LayoutProps> = ({
               ) : (
                 <span className="text-[10px] text-neutral-400">...</span>
               )}
-            </button>
-
-            <button
-              onClick={() => setAdminModalOpen(true)}
-              title="Admin Authentication Key"
-              className="p-1.5 border border-[#141414] bg-white hover:bg-[#F27D26] hover:text-white transition-colors cursor-pointer"
-            >
-              <Key className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
@@ -353,13 +324,47 @@ export const Layout: React.FC<LayoutProps> = ({
               <span className="font-mono text-xs font-bold uppercase tracking-wider">
                 3. Google Gemini AI Models & Health
               </span>
-              {status && <StatusBadge status={status.gemini.status} size="sm" />}
+              {status && (
+                <StatusBadge
+                  status={
+                    status.gemini.status === 'LIVE'
+                      ? 'CONNECTED'
+                      : status.gemini.status === 'AUTH_ERROR'
+                      ? 'AUTH_ERROR'
+                      : status.gemini.status === 'QUOTA_LIMITED'
+                      ? 'QUOTA_LIMITED'
+                      : status.gemini.status === 'WARNING'
+                      ? 'HIGH_DEMAND'
+                      : status.gemini.status
+                  }
+                  size="sm"
+                />
+              )}
             </div>
 
-            <p className="text-xs text-neutral-600">
-              Current Active Model: <span className="font-bold text-[#F27D26] font-mono">{status?.gemini.model || 'gemini-3.8-flash'}</span>
-              {status?.gemini.latencyMs != null && ` (${status.gemini.latencyMs}ms ping)`}
-            </p>
+            <div className="grid grid-cols-2 gap-2 font-mono text-xs">
+              <div className="p-2 border border-neutral-200 bg-neutral-50">
+                <span className="text-[10px] text-neutral-500 uppercase block">Gemini Authentication</span>
+                <span className="font-bold text-neutral-800">
+                  {status?.gemini.status === 'LIVE' || status?.gemini.status === 'WARNING' || status?.gemini.status === 'QUOTA_LIMITED'
+                    ? 'CONNECTED'
+                    : status?.gemini.status === 'AUTH_ERROR'
+                    ? 'AUTH FAILED (401)'
+                    : status?.gemini.status === 'NOT_CONFIGURED'
+                    ? 'NOT CONFIGURED'
+                    : status?.gemini.status || 'CHECKING'}
+                </span>
+              </div>
+              <div className="p-2 border border-neutral-200 bg-neutral-50">
+                <span className="text-[10px] text-neutral-500 uppercase block">Current Active Model</span>
+                <span className="font-bold text-[#F27D26]">
+                  {status?.gemini.model || 'gemini-3.8-flash'}
+                </span>
+                {status?.gemini.latencyMs != null && (
+                  <span className="text-[10px] text-neutral-500 ml-1">({status.gemini.latencyMs}ms)</span>
+                )}
+              </div>
+            </div>
 
             {status?.gemini.error && (
               <p className="font-mono text-[10px] text-red-600 bg-red-50 p-2 border border-red-200 break-words">
@@ -382,69 +387,6 @@ export const Layout: React.FC<LayoutProps> = ({
                 }}
               />
             </div>
-          </div>
-
-          {/* Admin Auth Status */}
-          <div className="border border-[#141414] p-3 bg-white">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="font-mono text-xs font-bold uppercase">4. Admin API Authorization</span>
-              <StatusBadge
-                status={status?.application.status === 'LIVE' ? 'LIVE' : 'WARNING'}
-                label="ADMIN_API_ENABLED"
-                size="sm"
-              />
-            </div>
-            <p className="text-xs text-neutral-600">
-              Write mutations, job extraction triggers, and commits are strictly server-authorized via API key.
-            </p>
-          </div>
-        </div>
-      </Modal>
-
-      {/* Admin Key Modal */}
-      <Modal
-        isOpen={adminModalOpen}
-        onClose={() => setAdminModalOpen(false)}
-        title="Admin Authentication Credentials"
-        maxWidth="sm"
-      >
-        <div className="space-y-4">
-          <p className="text-xs text-neutral-600">
-            Enter the admin key to authorize extraction requests, human confirmation commits, and job management.
-          </p>
-
-          <div>
-            <label className="block font-mono text-[11px] uppercase tracking-wider font-bold text-neutral-700 mb-1">
-              Admin API Key (x-admin-key)
-            </label>
-            <input
-              type="password"
-              value={adminKeyInput}
-              onChange={e => setAdminKeyInput(e.target.value)}
-              placeholder="e.g. v2-dev-admin-key"
-              className="w-full px-3 py-2 border-2 border-[#141414] font-mono text-xs focus:outline-none focus:border-[#F27D26] bg-white"
-            />
-            <p className="font-mono text-[10px] text-neutral-500 mt-1">
-              Default in development mode: <code className="bg-neutral-200 px-1">v2-dev-admin-key</code>
-            </p>
-          </div>
-
-          <div className="flex items-center justify-between pt-2">
-            <button
-              onClick={() => {
-                setAdminKeyInput('v2-dev-admin-key');
-              }}
-              className="text-xs font-mono text-neutral-600 hover:text-[#141414] underline cursor-pointer"
-            >
-              Reset to dev default
-            </button>
-
-            <button
-              onClick={handleSaveAdminKey}
-              className="px-4 py-2 bg-[#141414] text-white hover:bg-[#F27D26] font-mono text-xs uppercase font-bold tracking-wider transition-colors cursor-pointer"
-            >
-              {adminSaved ? 'Saved!' : 'Save Key'}
-            </button>
           </div>
         </div>
       </Modal>
